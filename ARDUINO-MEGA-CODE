@@ -1,0 +1,593 @@
+/*Slave Arduino code for Mega*/
+#include <SPI.h>
+#include<LiquidCrystal.h>
+#include <Servo.h>
+#include<Ethernet.h>
+#include<Wire.h>
+#include <SD.h>
+#include<Stepper.h>
+#include <RTClib.h>
+#define MOSI 11
+#define MISO 12
+#define SCK  13
+#define SS   10
+#define CS   53
+
+unsigned long timer;
+const int SDPin=4;
+LiquidCrystal lcd(2,3,9,5,6,7);
+Servo stadiumServo;//servo object
+RTC_DS1307 RTC;
+
+char state;
+char record;
+char seats[1];
+int seatNumber;
+int warning;
+byte index=0;
+
+String year,month,day,hour,minute,second,date,time;
+String code="";
+String rec;
+//Stadium Array leds
+const int StadiumArrayled[]={0,25,29,33,37,41,26,30,34,38,42,27,31,35,39,45,28,32,36,40,44};
+
+const int servoPin=8;
+
+const int SirenLedRED=16;
+const int SirenLedBLUE=17;
+
+const int ButtonServoClose=43;
+
+const int Interrupt=47;
+
+const int LedServoClosed=48;
+const int LedServoAccept=49;
+
+const int LedCardLeft=14;
+const int LedCardRight=15;
+
+const int LedCardAccept=23;
+const int LedCardReject=22;
+
+int switchPin=24;
+int lcdPin=19;
+
+const int in1Pin=52;
+const int in2Pin=51;
+const int in3Pin=50;
+const int in4Pin=46;
+
+const int piezoPin=68;
+const int stepperButtonL=67;
+const int stepperButtonR=66;
+
+Stepper motor(512,in1Pin,in2Pin,in3Pin,in4Pin);
+
+byte uid[4];
+byte data[4];
+int val=0;
+
+//Ethernet
+byte mac[] = { 0xDE, 0xAD, 0xBE, 0xEF, 0xFE, 0xED };
+IPAddress ip(192,168,0,5);
+byte server[] = { 192, 168, 0, 4 };
+EthernetClient client;
+const int counter=1;
+
+boolean lastButton=LOW;
+boolean currentButton=LOW;
+boolean lcdOn=false;
+long previousMillis=0;
+long interval=1000;
+int ledAnalog=LOW;
+
+void setup() {
+  Ethernet.begin(mac,ip);
+  pinMode(switchPin,INPUT);
+  pinMode(lcdPin,OUTPUT);
+  pinMode(piezoPin,OUTPUT);
+ //initialise lcd
+lcd.begin(16,2);
+
+//attach pin
+stadiumServo.attach(servoPin);
+
+//Stadium Array leds
+for(int index=0;index<21;index++)
+{
+  pinMode(StadiumArrayled[index],OUTPUT);
+}
+  pinMode(SirenLedRED,OUTPUT);
+  pinMode(SirenLedBLUE,OUTPUT);
+  pinMode(Interrupt,INPUT);
+  pinMode(ButtonServoClose,INPUT);
+  pinMode(LedServoClosed,OUTPUT);
+  pinMode(LedServoAccept,OUTPUT);  
+  pinMode(LedCardAccept,OUTPUT);
+  pinMode(LedCardReject,OUTPUT);
+  pinMode(LedCardRight,OUTPUT);
+  pinMode(LedCardLeft,OUTPUT);
+  
+  pinMode(in1Pin,OUTPUT);
+  pinMode(in2Pin,OUTPUT);
+  pinMode(in3Pin,OUTPUT);
+  pinMode(in4Pin,OUTPUT);
+  
+  pinMode(SDPin,OUTPUT);
+  pinMode(SS,OUTPUT);
+  pinMode(CS,OUTPUT);
+  
+  pinMode(69,OUTPUT);
+  pinMode(67,INPUT);
+  pinMode(66,INPUT);
+  
+  motor.setSpeed(10);
+
+	Serial.begin(9600);	// Initialize serial communications with the PC
+	SPI.begin();		// Init SPI bus
+        RTC.begin();
+        if(!RTC.isrunning())
+        {
+          Serial.println("RTC is Not running");
+          RTC.adjust(DateTime(__DATE__, __TIME__));
+          // This line sets the RTC with an explicit date & time, for example to set
+    // January 21, 2014 at 3am you would call:
+    // rtc.adjust(DateTime(2014, 1, 21, 3, 0, 0));
+        }
+
+Serial.println("Wire Stadium - Wireless Payment - v2.0");
+  Serial.println("-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-\n");
+  Serial.print("IP Address        : ");
+  Serial.println(Ethernet.localIP());
+  Serial.print("Subnet Mask       : ");
+  Serial.println(Ethernet.subnetMask());
+  Serial.print("Default Gateway IP: ");
+  Serial.println(Ethernet.gatewayIP()); 
+ Serial.println("Scan PICC to see UID and type...");
+ 
+ SDCardHeader();
+}
+
+void loop() {
+ Wire.begin(4);
+ Wire.onReceive(receiveEvent);
+
+ timer=millis();
+ unsigned long currentMillis=millis();
+ if(currentMillis-previousMillis>interval){
+  previousMillis=currentMillis;
+ if(ledAnalog==LOW)
+ledAnalog=HIGH;
+else
+ledAnalog=LOW;
+digitalWrite(69,ledAnalog);
+ }
+
+currentButton=debounce(lastButton);
+  if(lastButton==LOW && currentButton==HIGH)
+  {
+  lcdOn=!lcdOn;
+  }
+  lastButton=currentButton;
+  digitalWrite(lcdPin,lcdOn);
+
+  //CLOSES THE TURNSTILE
+   if( digitalRead(ButtonServoClose)==HIGH){
+stadiumServo.write(180);
+warning+=5;//preset 
+state='I';//preset Invalid
+record='I';//preset Invalid
+digitalWrite(LedServoAccept,LOW);//TURNS OFF AS DOOR CLOSES
+digitalWrite(LedServoClosed,HIGH);//TURNS ON AS DOOR CLOSES
+  lcd.setCursor(0,0);
+  lcd.print("SWIPE CARD,     ");
+  lcd.setCursor(0,1);
+  lcd.print("TAG OR PHONE    ");
+ }
+ 
+ if(digitalRead(Interrupt)==HIGH){
+ Serial.println();
+
+Serial.print("Card UID:");
+	for (byte i = 0; i < 4; i++) {
+		Serial.print(data[i] < 0x10 ? "0" : "");
+		Serial.print(data[i], HEX);
+	} 
+	Serial.println();
+code=String(data[0],HEX)+String(data[1],HEX)+String(data[2],HEX)+String(data[3],HEX);
+code.toUpperCase();
+Serial.print("UID STRING:");
+Serial.println(code);
+
+//comparing two strings
+String str="CEBB7024",rya="747A4DCD",cri="F4467024";
+
+if(code.equals(str))Serial.println("Welcome Ron");
+if(code.equals(rya))Serial.println("Welcome Ryan");
+if(code.equals(cri))Serial.println("Criminal");
+
+    lcd.setCursor(0,0);
+    lcd.print("AUTHENTICATING");
+    lcd.setCursor(0,1);
+    lcd.print("PLEASE WAIT ");
+    
+/****************************************************************/
+//Ethernet function calls go here
+delay(300);
+statusCheck(code);
+delay(200);
+dataCheckStatus();
+delay(200);
+recordCheck(code);
+delay(200);
+dataCheckRecord();
+delay(200);
+warningsCheck(code);
+delay(200);
+dataCheckWarnings();
+delay(200);
+/*****************************************************************/
+
+if(state=='P' && record=='N' && warning < 5) {
+lcd.setCursor(0,0);
+lcd.print("Code Accepted   ");
+lcd.setCursor(0,1);
+lcd.print("Proceed to Left ");
+
+beep(500);
+//left entrance green led
+digitalWrite(LedCardLeft,HIGH);
+
+  stadiumServo.write(0);
+digitalWrite(LedServoClosed,LOW);//TURNS OFF AS DOOR OPENS
+digitalWrite(LedServoAccept,HIGH);
+delay(2000);
+
+lcd.setCursor(0,0);
+//delay(2000);
+  lcd.print("PLEASE WAIT.....");
+  lcd.setCursor(0,1);
+  lcd.print("                ");
+
+//Stepper code goes here
+/*if(stepperButtonL==HIGH)
+{
+  motor.step(512);
+}
+*/
+delay(1000);
+digitalWrite(LedCardLeft,LOW);
+
+/*********************************/
+checkIn(code,counter);
+delay(500);
+seatCheck(code);
+delay(500);
+dataCheckSeat();
+/*********************************/
+}
+//Rejection due to criminal record code 
+else if(record=='C'){
+  lcd.setCursor(0,0);
+lcd.print("Proceed to Right");
+lcd.setCursor(0,1);
+lcd.print(">>>  >>>  >>>   ");
+for(int c=0;c<3;c++)
+{
+digitalWrite(LedCardReject,HIGH);//Red rejection led lights
+delay(300);
+digitalWrite(LedCardReject,LOW);
+delay(300);
+}
+//green right signalling led
+digitalWrite(LedCardRight,HIGH);
+delay(2000);
+digitalWrite(LedCardRight,LOW);
+/*
+if(stepperButtonR==HIGH)
+{
+ motor.step(-512); 
+}*/
+/*loop for Sirens*/
+for(int s=0;s<4;s++)
+{
+  digitalWrite(SirenLedRED,HIGH);
+  delay(200);
+  digitalWrite(SirenLedBLUE,HIGH);
+  delay(200);
+  digitalWrite(SirenLedRED,LOW);
+  delay(200);
+  digitalWrite(SirenLedBLUE,LOW);
+  delay(200);
+ 
+  
+state='I';//preset Invalid
+record='I';//preset Invalid
+}
+lcd.setCursor(0,0);
+  lcd.print("SWIPE CARD,     ");
+  lcd.setCursor(0,1);
+  lcd.print("TAG OR PHONE    ");
+}
+else {
+  Serial.println("Get out of Here");
+  lcd.setCursor(0,0);
+  lcd.print("                ");
+  lcd.setCursor(0,0);
+  lcd.print("Proceed to Right");
+  lcd.setCursor(0,1);
+  lcd.print(">>>  >>>  >>>   ");
+for(int r=0;r<3;r++){
+  digitalWrite(LedCardReject,HIGH);
+  delay(300);
+  digitalWrite(LedCardReject,LOW);
+  delay(300);
+}
+digitalWrite(LedCardRight,HIGH);
+delay(3000);
+digitalWrite(LedCardRight,LOW);
+/*
+if(stepperButtonR==HIGH)
+{
+ motor.step(-512); 
+}
+*/
+
+lcd.setCursor(0,0);
+  lcd.print("SWIPE CARD,     ");
+  lcd.setCursor(0,1);
+  lcd.print("TAG OR PHONE    ");
+}
+GetRTC(code,record);
+}//END BUTTONSERVOCLOSE
+
+}
+
+void receiveEvent(int howMany)
+{
+while(Wire.available()>0){
+  for (int p=0;p<4;p++){
+uid[p]=Wire.read();
+  }
+}
+for(int j=0;j<4;j++)
+{
+data[j]=uid[j];
+}
+}
+/*****************************************************************
+******************Ethernet Functions******************************
+/*****************************************************************/
+//code to update checkin in update_checkin.php
+
+void checkIn(String code,int counter){
+if(client.connect(server,80)){
+Serial.println("Connected");
+//make a http request
+client.print("GET /update_checkin.php");
+client.print("?");
+client.print("uid=");
+client.print(code);
+client.print("&");
+client.print("counter=");
+client.print(counter);
+client.println();
+client.stop();
+}
+else{
+Serial.println("-->Connection failed");
+delay(200);
+}//end of checkin update
+}
+
+//status check
+void statusCheck(String code){
+if(client.connect(server,80)){
+Serial.println("Status Connected");
+//make a http request
+client.print("GET /status_check.php");
+client.print("?");
+client.print("query=");
+client.print(code);
+client.println();
+}
+else{
+Serial.println("-->Status Connection failed");
+delay(200);
+}
+}//end of status check
+
+
+//RECORD CHECK
+ void recordCheck(String code){
+if(client.connect(server,80)){
+Serial.println("->Record Connected");
+//make a http request
+client.print("GET /record_check.php");
+client.print("?");
+client.print("query=");
+client.print(code);
+client.println();
+}
+else{
+Serial.println("-->Record Connection failed");
+delay(200);
+}
+}//end of RECORD CHECK
+
+//SEAT NUMBER CHECK
+
+void seatCheck(String code){
+if(client.connect(server,80)){
+Serial.println("->Seat Connected");
+//make a http request
+client.print("GET /check/seat_check.php");
+client.print("?");
+client.print("query=");
+client.print(code);
+client.println();
+}
+
+else{
+Serial.println("-->Seat Connection failed");
+delay(200);
+}
+
+}//end of SEAT NUMBER CHECK
+
+//warnings check
+void warningsCheck(String code){
+if(client.connect(server,80)){
+Serial.println("Warnings Connected");
+//make a http request
+client.print("GET /warnings_check.php");
+client.print("?");
+client.print("query=");
+client.print(code);
+client.println();
+
+}
+else{
+Serial.println("-->Warnings Connection failed");
+delay(200);
+}
+
+}//end of warnings
+
+//DATA CHECK
+void dataCheckSeat()
+{  
+  if (client.available()) {
+     for(int index=0;index<2;index++){
+     seats[index] = client.read();
+   }
+seatNumber=atoi(seats);
+Serial.println(seatNumber);
+    // for(int t=0;t<2;t++){
+    // Serial.print(seats[t]);  }
+
+for(int x=0;x<21;x++)
+{
+  if(seatNumber==x){digitalWrite(StadiumArrayled[x],HIGH);};
+}
+client.stop();
+}
+
+}
+
+void dataCheckStatus()
+{
+  if (client.available()) {
+state = client.read();
+Serial.print(state);
+Serial.println();
+}
+client.stop();
+}
+
+void dataCheckRecord()
+{
+  if (client.available()) {
+record = client.read();
+Serial.print(record);
+Serial.println();
+}
+client.stop();
+}
+
+void dataCheckWarnings()
+{
+  if (client.available()) {
+warning = client.parseInt();
+Serial.print(warning);
+Serial.println();
+}
+client.stop();
+}
+
+void beep(unsigned char delayms){
+  for(int b=0;b<3;b++){
+  digitalWrite(68,HIGH);
+  digitalWrite(LedCardAccept,HIGH);
+  delay(delayms);
+  digitalWrite(68,LOW);
+  digitalWrite(LedCardAccept,LOW);
+  delay(100);
+  }
+}
+
+boolean debounce(boolean last)
+{
+  boolean current=digitalRead(switchPin);
+  if(last!=current)
+  {
+    delay(5);
+    current=digitalRead(switchPin);
+  }
+  return current;
+}
+//DATA LOGGER
+void SDCardHeader()
+{
+ if(!SD.begin(SDPin)){
+  Serial.println("Memory Card Failure");
+  //return;
+ }
+else{ 
+ Serial.println("Memory Card Connected");
+ File dataFile=SD.open("WireStadiumLog.csv",FILE_WRITE);
+ if(dataFile)
+ {
+    dataFile.println("\nNew Log Started");
+   dataFile.println("Date,Time,UID,Record");
+ dataFile.close();
+ }
+ else
+ {
+   Serial.println("Log file could not be opened");
+ }
+}
+}
+
+void GetRTC(String code,char record)
+{
+DateTime datetime=RTC.now();
+year=String(datetime.year(),  DEC);
+month=String(datetime.month(),  DEC);
+day=String(datetime.day(),  DEC);
+hour=String(datetime.hour(),  DEC);
+minute=String(datetime.minute(),  DEC);
+second=String(datetime.second(),  DEC);
+
+date=year + "/" +month+ "/" + day;
+time=hour + ":" +minute+ ":" + second;
+
+if(record=='N'){rec="NONE";}
+else if(record=='C'){rec="CRIMINAL";}
+else{rec="INVALID";}
+
+if(!SD.begin(SDPin)){
+  Serial.println("Memory Card Failure");
+  //return;
+ }
+else{ 
+ Serial.println("Memory Card Connected");
+File dataFile=SD.open("WireStadiumLog.csv",FILE_WRITE);
+if(dataFile)
+{
+ dataFile.print(date);
+dataFile.print(",");
+dataFile.print(time);
+dataFile.print(",");
+dataFile.print(code);
+dataFile.print(",");
+dataFile.println(rec);
+dataFile.close();
+}
+else
+{
+ Serial.println(F("Could not open log file")); 
+}
+}
+  }
